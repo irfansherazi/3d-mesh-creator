@@ -94,7 +94,11 @@ function runPythonProcessor(
     ]
 
     // Use Python from the virtual environment in scripts/.venv
-    const pythonExecutable = path.join(process.cwd(), "scripts", ".venv", "Scripts", "python.exe")
+    // Detect OS and use appropriate path
+    const isWindows = process.platform === 'win32'
+    const pythonExecutable = isWindows
+      ? path.join(process.cwd(), "scripts", ".venv", "Scripts", "python.exe")
+      : path.join(process.cwd(), "scripts", ".venv", "bin", "python3")
 
     console.log("Python executable:", pythonExecutable)
     console.log("Python args:", args)
