@@ -616,14 +616,12 @@ def process_point_cloud(input_path, output_path, voxel_size, method, enable_filt
                 "bounding_box_volume": mesh.get_axis_aligned_bounding_box().volume()
             }
         else:
-            # Save as point cloud in PLY format, then copy to output
-            temp_ply = output_path.replace('.glb', '.ply')
-            o3d.io.write_point_cloud(temp_ply, pcd)
-            
-            # For point cloud output, just copy the PLY file
-            import shutil
-            shutil.copy(temp_ply, output_path)
-            
+            # Point clouds can't be stored as GLB; the caller passes a .ply/.pcd output path for this mode
+            if not output_path.lower().endswith(('.ply', '.pcd')):
+                raise Exception("Point cloud output needs a .ply or .pcd output path")
+            if not o3d.io.write_point_cloud(output_path, pcd):
+                raise Exception("Failed to write output point cloud")
+
             stats = {
                 "original_points": original_points,
                 "processed_points": processed_points,

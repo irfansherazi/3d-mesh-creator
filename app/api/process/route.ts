@@ -2,6 +2,7 @@ import { type NextRequest, NextResponse } from "next/server"
 import { spawn } from "child_process"
 import path from "path"
 import { existsSync } from "fs"
+import { PYTHON_BIN, SCRIPTS_DIR, UPLOADS_DIR, uploadPath } from "@/lib/paths"
 
 interface ProcessingParams {
   filename: string
@@ -20,10 +21,10 @@ export async function POST(request: NextRequest) {
     const params: ProcessingParams = await request.json()
     console.log("Received params:", params)
 
-    const inputPath = path.join(process.cwd(), "uploads", params.filename)
+    const inputPath = uploadPath(params.filename)
     console.log("Input path:", inputPath)
 
-    if (!existsSync(inputPath)) {
+    if (!inputPath || !existsSync(inputPath)) {
       console.log("File not found:", inputPath)
       return NextResponse.json({ error: "File not found" }, { status: 404 })
     }
@@ -32,8 +33,9 @@ export async function POST(request: NextRequest) {
 
     // Generate output filename
     const timestamp = Date.now()
-    const outputFilename = `processed_${timestamp}.glb`
-    const outputPath = path.join(process.cwd(), "uploads", outputFilename)
+    // Without reconstruction the result is a cleaned point cloud, which GLB can't hold
+    const outputFilename = `processed_${timestamp}.${params.enableReconstruction ? "glb" : "ply"}`
+    const outputPath = path.join(UPLOADS_DIR, outputFilename)
     console.log("Output path:", outputPath)
 
     console.log("Starting Python processor...")
@@ -82,7 +84,7 @@ function runPythonProcessor(
 
     // Python script arguments - updated for new advanced processor
     const args = [
-      path.join(process.cwd(), "scripts", "process_point_cloud.py"),
+      path.join(SCRIPTS_DIR, "process_point_cloud.py"),
       inputPath,
       outputPath,
       params.voxelSize.toString(),
@@ -93,12 +95,8 @@ function runPythonProcessor(
       params.smoothingMode || 'medium',
     ]
 
-    // Use Python from the virtual environment in scripts/.venv
-    // Detect OS and use appropriate path
-    const isWindows = process.platform === 'win32'
-    const pythonExecutable = isWindows
-      ? path.join(process.cwd(), "scripts", ".venv", "Scripts", "python.exe")
-      : path.join(process.cwd(), "scripts", ".venv", "bin", "python3")
+    // scripts/.venv locally; PYTHON_BIN points at /opt/venv in the Docker image
+    const pythonExecutable = PYTHON_BIN
 
     console.log("Python executable:", pythonExecutable)
     console.log("Python args:", args)

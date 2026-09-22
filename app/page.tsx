@@ -1,257 +1,299 @@
 "use client"
 
-import { useState } from "react"
-import { FileUploadSection } from "@/components/file-upload-section"
-import { ProcessingControls, type ProcessingParams } from "@/components/processing-controls"
-import { ThreeDViewer } from "@/components/three-d-viewer"
-import { ApiClient, type UploadResponse } from "@/lib/api-client"
+import { useEffect, useRef, useState, type DragEvent } from "react"
+import { Alert, Button, Chip, Spinner } from "@heroui/react"
+import { Box, Check, Upload } from "lucide-react"
+import { ApiClient } from "@/lib/api-client"
+import { formatBytes, formatCount, friendlyName } from "@/lib/quality"
+import { ControlBar } from "@/components/studio/control-bar"
+import { FileSummary } from "@/components/studio/file-summary"
+import { ProcessingPanel } from "@/components/studio/processing-panel"
+import { ResultPanel } from "@/components/studio/result-panel"
+import { SettingsPanel } from "@/components/studio/settings-panel"
+import {
+  StudioViewer,
+  type ObjectInfo,
+  type StudioViewerHandle,
+  type ViewerView,
+} from "@/components/studio/studio-viewer"
+import { useStudio } from "@/components/studio/use-studio"
+import type { ViewSettings } from "@/components/studio/view-options"
+
+const PANEL_INSET = 460
 
 export default function Home() {
-  const [uploadedFile, setUploadedFile] = useState<UploadResponse | null>(null)
-  const [processedFile, setProcessedFile] = useState<string | null>(null)
-  const [processingStats, setProcessingStats] = useState<any>(null)
+  const studio = useStudio()
+  const viewer = useRef<StudioViewerHandle>(null)
+  const fileInput = useRef<HTMLInputElement>(null)
+  const [view, setView] = useState<ViewerView>("scan")
+  const [scanInfo, setScanInfo] = useState<ObjectInfo | null>(null)
+  const [modelInfo, setModelInfo] = useState<ObjectInfo | null>(null)
+  const [viewerLoading, setViewerLoading] = useState(false)
+  const [anchor, setAnchor] = useState<{ x: number; y: number } | null>(null)
+  const [dragging, setDragging] = useState(false)
+  const [viewSettings, setViewSettings] = useState<ViewSettings>({
+    autoRotate: true,
+    autoRotateSpeed: 0.3,
+    showTurntable: true,
+    showGrid: false,
+  })
+  // The panel floats over the scene on wide screens; on phones it sits below it
+  const [isWide, setIsWide] = useState(false)
+  useEffect(() => {
+    const query = window.matchMedia("(min-width: 768px)")
+    const update = () => setIsWide(query.matches)
+    update()
+    query.addEventListener("change", update)
+    return () => query.removeEventListener("change", update)
+  }, [])
 
-  // Processing state
-  const [isProcessing, setIsProcessing] = useState(false)
-  const [processingProgress, setProcessingProgress] = useState(0)
-  const [processingError, setProcessingError] = useState<string | null>(null)
-  const [processingSuccess, setProcessingSuccess] = useState(false)
-  const [processingStage, setProcessingStage] = useState<string | null>(null)
-  const [estimatedTimeRemaining, setEstimatedTimeRemaining] = useState<number | null>(null)
-  const [processingStartTime, setProcessingStartTime] = useState<number | null>(null)
-  const [abortController, setAbortController] = useState<AbortController | null>(null)
-  const [viewMode, setViewMode] = useState<"original" | "processed">("original")
+  const { stage, upload, processedFile } = studio
+  const isEmpty = stage === "empty"
+  const name = upload?.originalName ? friendlyName(upload.originalName) : ""
+  const isMesh = processedFile?.toLowerCase().endsWith(".glb") ?? false
 
-  const handleFileUpload = async (file: File) => {
-    try {
-      const response = await ApiClient.uploadFile(file)
+  // Show the finished model as soon as it exists; go back to the scan when it's cleared
+  useEffect(() => {
+    setView(processedFile ? "model" : "scan")
+    if (!processedFile) setModelInfo(null)
+  }, [processedFile])
+  useEffect(() => {
+    if (!upload) setScanInfo(null)
+  }, [upload])
 
-      if (response.success) {
-        setUploadedFile(response)
-        setProcessedFile(null) // Reset processed file when new file is uploaded
-        setProcessingStats(null)
-        setProcessingError(null)
-        setProcessingSuccess(false)
-        setViewMode("original") // Reset to original view when new file uploaded
-      } else {
-        setProcessingError(response.error || "Upload failed")
-      }
-    } catch (error) {
-      setProcessingError("Failed to upload file")
-      console.error("Upload error:", error)
-    }
+  const chooseFile = () => fileInput.current?.click()
+
+  const onDragOver = (e: DragEvent) => {
+    if (stage === "processing" || !e.dataTransfer.types.includes("Files")) return
+    e.preventDefault()
+    setDragging(true)
+  }
+  const onDrop = (e: DragEvent) => {
+    e.preventDefault()
+    setDragging(false)
+    const file = e.dataTransfer.files[0]
+    if (file && stage !== "processing") void studio.uploadFile(file)
   }
 
-  const handleCancelProcessing = () => {
-    if (abortController) {
-      abortController.abort()
-      setAbortController(null)
-    }
-    setIsProcessing(false)
-    setProcessingProgress(0)
-    setProcessingStage(null)
-    setEstimatedTimeRemaining(null)
-    setProcessingStartTime(null)
-    setProcessingError("Processing cancelled by user")
-  }
-
-  const handleProcessing = async (params: ProcessingParams) => {
-    if (!uploadedFile?.filename) {
-      setProcessingError("No file uploaded")
-      return
-    }
-
-    // Create abort controller for cancellation
-    const controller = new AbortController()
-    setAbortController(controller)
-
-    setIsProcessing(true)
-    setProcessingProgress(0)
-    setProcessingError(null)
-    setProcessingSuccess(false)
-    setProcessingStage('loading')
-    setProcessingStartTime(Date.now())
-    setEstimatedTimeRemaining(null)
-
-    // Calculate estimated time based on parameters
-    let estimatedTotalTime = 20 // Base time in seconds
-    if (params.densityMode === "dense") estimatedTotalTime += 25
-    else if (params.densityMode === "medium") estimatedTotalTime += 15
-    else estimatedTotalTime += 8
-    
-    if (params.enableFiltering) estimatedTotalTime += 10
-    if (params.enableReconstruction) estimatedTotalTime += 15
-
-    // Enhanced progress simulation with stage awareness
-    let currentProgress = 0
-    const progressInterval = setInterval(() => {
-      if (controller.signal.aborted) {
-        clearInterval(progressInterval)
-        return
-      }
-      
-      setProcessingProgress((prev) => {
-        if (prev >= 95) return 95 // Hard cap at 95% to wait for API response
-        
-        const elapsed = (Date.now() - (processingStartTime || Date.now())) / 1000
-        const remaining = Math.max(0, estimatedTotalTime - elapsed)
-        setEstimatedTimeRemaining(Math.ceil(remaining))
-        
-        // Stage-based progress increments
-        let increment = 1
-        if (prev < 20) { // Loading stage
-          setProcessingStage('loading')
-          increment = Math.random() * 3 + 1
-        } else if (prev < 45) { // Filtering stage
-          setProcessingStage('filtering')
-          increment = Math.random() * 2 + 0.5
-        } else if (prev < 80) { // Reconstruction stage
-          setProcessingStage('reconstruction')
-          increment = Math.random() * 1.5 + 0.5
-        } else { // Optimization stage
-          setProcessingStage('optimization')
-          increment = Math.random() * 0.8 + 0.2
-        }
-        
-        return Math.min(95, prev + increment)
-      })
-    }, 800) // Slightly slower updates for smoother animation
-
-    // Extended timeout for complex processing
-    const timeoutId = setTimeout(() => {
-      if (!controller.signal.aborted) {
-        clearInterval(progressInterval)
-        setProcessingProgress(100)
-        setProcessingError("Processing timeout - the operation took longer than expected. This may happen with very large point clouds or complex geometries.")
-        setIsProcessing(false)
-        setProcessingStage(null)
-        setEstimatedTimeRemaining(null)
-        setAbortController(null)
-      }
-    }, 180000) // 3 minute timeout for complex processing
-
-    try {
-      console.log("Starting processing request with params:", params)
-      
-      // Check if cancelled before making API call
-      if (controller.signal.aborted) {
-        throw new Error('Processing cancelled')
-      }
-      
-      const response = await ApiClient.processFile({
-        filename: uploadedFile.filename,
-        ...params,
-      })
-
-      console.log("Processing response received:", response)
-
-      // Check if cancelled after API response
-      if (controller.signal.aborted) {
-        throw new Error('Processing cancelled')
-      }
-
-      // Immediately clear interval and timeout when response is received
-      clearInterval(progressInterval)
-      clearTimeout(timeoutId)
-
-      if (response.success) {
-        setProcessingProgress(100)
-        setProcessingStage('completed')
-        setProcessedFile(response.processedFile || null)
-        setProcessingStats(response.stats)
-        setProcessingSuccess(true)
-        setEstimatedTimeRemaining(0)
-        setViewMode("processed") // Automatically switch to processed view
-
-
-        // Clear success message and stage after 8 seconds
-        setTimeout(() => {
-          setProcessingSuccess(false)
-          setProcessingStage(null)
-        }, 8000)
-      } else {
-        setProcessingProgress(0) // Reset progress on error
-        setProcessingStage(null)
-        setProcessingError(response.error || "Processing failed")
-        setEstimatedTimeRemaining(null)
-        console.error("Processing failed with error:", response.error)
-      }
-    } catch (error) {
-      // Ensure cleanup happens even on exception
-      clearInterval(progressInterval)
-      clearTimeout(timeoutId)
-
-      if (controller.signal.aborted) {
-        // Don't show error if user cancelled
-        return
-      }
-
-      setProcessingProgress(0) // Reset progress on error
-      setProcessingStage(null)
-      setProcessingError("Failed to process file - network or server error. Please try again.")
-      setEstimatedTimeRemaining(null)
-      console.error("Processing exception:", error)
-    } finally {
-      setIsProcessing(false)
-      setProcessingStartTime(null)
-      setAbortController(null)
-    }
-  }
+  const scanDetail = [
+    scanInfo ? `${formatCount(scanInfo.vertices)} ${scanInfo.kind === "points" ? "points" : "vertices"}` : "Reading scan",
+    upload?.size ? formatBytes(upload.size) : null,
+  ]
+    .filter(Boolean)
+    .join(", ")
 
   return (
-    <div className="min-h-screen bg-background">
-      <div className="container mx-auto px-4 py-8">
-        <header className="mb-8">
-          <div className="flex items-center gap-3 mb-3">
-            <div className="w-10 h-10 bg-gradient-to-br from-blue-600 to-purple-600 rounded-lg flex items-center justify-center">
-              <svg className="w-6 h-6 text-white" fill="currentColor" viewBox="0 0 20 20">
-                <path d="M3 4a1 1 0 011-1h12a1 1 0 011 1v2a1 1 0 01-1 1H4a1 1 0 01-1-1V4zM3 10a1 1 0 011-1h6a1 1 0 011 1v6a1 1 0 01-1 1H4a1 1 0 01-1-1v-6zM14 9a1 1 0 00-1 1v6a1 1 0 001 1h2a1 1 0 001-1v-6a1 1 0 00-1-1h-2z"/>
-              </svg>
-            </div>
-            <div>
-              <h1 className="text-3xl font-bold text-primary">3D Mesh Creator Pro</h1>
-              <div className="flex items-center gap-2 mt-1">
-                <span className="text-xs bg-blue-100 text-blue-800 px-2 py-0.5 rounded-full font-medium">E-COMMERCE</span>
-              </div>
-            </div>
+    <div
+      className={`studio-backdrop relative w-full text-foreground ${isEmpty ? "h-dvh overflow-hidden" : "min-h-dvh overflow-x-hidden md:h-dvh md:overflow-hidden"}`}
+      style={{ ["--pool-x" as string]: isEmpty ? "50%" : "39%" }}
+      onDragOver={onDragOver}
+      onDragLeave={(e) => e.relatedTarget === null && setDragging(false)}
+      onDrop={onDrop}
+    >
+      <input
+        ref={fileInput}
+        type="file"
+        accept=".ply,.pcd,.obj"
+        className="hidden"
+        onChange={(e) => {
+          const file = e.target.files?.[0]
+          if (file) void studio.uploadFile(file)
+          e.target.value = ""
+        }}
+      />
+
+      {/* Scene: full screen when empty, then left of the panel (desktop) or above it (phones) */}
+      <div
+        className={`transition-[right] duration-500 ease-out ${
+          isEmpty
+            ? "absolute inset-0"
+            : "relative mt-[148px] h-[52svh] md:absolute md:inset-0 md:mt-0 md:h-auto"
+        }`}
+      >
+        <StudioViewer
+          ref={viewer}
+          scanUrl={upload?.filename ? ApiClient.getDownloadUrl(upload.filename) : undefined}
+          modelUrl={processedFile ? ApiClient.getDownloadUrl(processedFile) : undefined}
+          view={view}
+          showDropTarget={isEmpty}
+          showTurntable={isEmpty || viewSettings.showTurntable}
+          showGrid={!isEmpty && viewSettings.showGrid}
+          autoRotate={viewSettings.autoRotate}
+          autoRotateSpeed={viewSettings.autoRotateSpeed}
+          insetRight={isWide && !isEmpty ? PANEL_INSET : 0}
+          onLoadingChange={setViewerLoading}
+          onScanInfo={setScanInfo}
+          onModelInfo={setModelInfo}
+          onError={studio.setError}
+          onAnchorChange={isEmpty ? setAnchor : undefined}
+        />
+
+        {isEmpty && anchor && (
+          <div
+            className="pointer-events-none absolute flex -translate-x-1/2 -translate-y-1/2 flex-col items-center gap-2 text-white"
+            style={{ left: anchor.x, top: anchor.y }}
+          >
+            {studio.uploading ? (
+              <>
+                <Spinner color="current" />
+                <div className="text-base font-medium">Uploading your scan</div>
+              </>
+            ) : (
+              <>
+                <Upload className="size-7" strokeWidth={1.8} />
+                <div className="text-base font-medium">{dragging ? "Release to upload" : "Drop the file here"}</div>
+                <div className="flex gap-1.5">
+                  {[".ply", ".pcd", ".obj"].map((ext) => (
+                    <span key={ext} className="rounded-full bg-white/15 px-2 py-0.5 text-xs">
+                      {ext}
+                    </span>
+                  ))}
+                </div>
+              </>
+            )}
           </div>
-          <p className="text-muted-foreground text-lg">
-            Transform scanner point clouds into professional 3D models ready for e-commerce platforms.
-          </p>
-        </header>
+        )}
 
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-          <div className="space-y-8">
-            <FileUploadSection
-              onFileUpload={handleFileUpload}
-              uploadedFile={uploadedFile}
-              isProcessing={isProcessing}
-            />
-
-            <ProcessingControls
-              onProcess={handleProcessing}
-              onCancel={handleCancelProcessing}
-              isProcessing={isProcessing}
-              processingProgress={processingProgress}
-              processingError={processingError || undefined}
-              processingSuccess={processingSuccess}
-              disabled={!uploadedFile}
-              processingStage={processingStage || undefined}
-              estimatedTimeRemaining={estimatedTimeRemaining || undefined}
+        {!isEmpty && (
+          <div className="absolute inset-x-0 bottom-3 flex justify-center px-3 md:bottom-8 md:right-[460px]">
+            <ControlBar
+              view={view}
+              onViewChange={setView}
+              modelAvailable={Boolean(processedFile)}
+              settings={viewSettings}
+              onSettingsChange={setViewSettings}
+              viewer={viewer}
             />
           </div>
+        )}
+      </div>
 
-          <div className="lg:sticky lg:top-8">
-            <ThreeDViewer
-              originalFile={uploadedFile?.filename}
-              processedFile={processedFile || undefined}
-              processingStats={processingStats}
-              viewMode={viewMode}
-              onViewModeChange={setViewMode}
-            />
+      {!isEmpty && (
+        // Frosted card so the title stays readable over dark or busy scans
+        <div className="absolute left-3 top-[72px] z-10 max-w-[calc(100%-24px)] glass rounded-3xl px-4 py-3 shadow-surface md:left-7 md:top-[84px] md:max-w-[min(520px,calc(100%-520px))] md:px-5 md:py-4">
+          <h1 className="truncate text-3xl font-semibold tracking-tight md:text-[40px] md:leading-[1.1]">{name}</h1>
+          <div className="mt-2.5 flex flex-wrap gap-2">
+            <Chip>{view === "model" ? "3D model" : "Scan preview"}</Chip>
+            {view === "model" && modelInfo?.faces ? (
+              <Chip>{formatCount(modelInfo.faces)} faces</Chip>
+            ) : scanInfo ? (
+              <Chip>
+                {formatCount(scanInfo.vertices)} {scanInfo.kind === "points" ? "points" : "vertices"}
+              </Chip>
+            ) : null}
+            {viewerLoading && (
+              <Chip>
+                <Spinner size="sm" color="current" />
+                <Chip.Label>Loading</Chip.Label>
+              </Chip>
+            )}
           </div>
         </div>
-      </div>
+      )}
+
+      <header className="pointer-events-none absolute inset-x-0 top-0 z-20 flex h-[72px] items-center px-6 md:px-8">
+        <button
+          type="button"
+          onClick={studio.stage === "processing" ? undefined : studio.startOver}
+          className="pointer-events-auto glass -ml-1.5 flex items-center gap-2.5 rounded-full py-1 pl-1 pr-3.5 text-foreground shadow-surface"
+        >
+          <span className="flex size-8 items-center justify-center rounded-[10px] bg-accent text-accent-foreground">
+            <Box className="size-[18px]" />
+          </span>
+          <span className="text-base font-semibold">Mesh Creator</span>
+        </button>
+      </header>
+
+      {isEmpty && (
+        <main className="pointer-events-none relative z-10 flex flex-col items-center px-6 pt-24 text-center md:pt-[108px]">
+          <Chip color="accent" variant="soft">
+            Point cloud to GLB
+          </Chip>
+          <h1 className="mt-4 max-w-3xl text-4xl font-semibold leading-[1.05] tracking-[-0.035em] md:text-6xl">
+            Put a scan on the turntable
+          </h1>
+          <p className="mt-4 max-w-xl text-base leading-relaxed text-zinc-600 md:text-lg">
+            Drop a PLY, PCD or OBJ file from your scanner. You get back a GLB model your store can show in 3D.
+          </p>
+          <div className="pointer-events-auto mt-7 flex gap-3">
+            <Button size="lg" onPress={chooseFile} isPending={studio.uploading}>
+              {({ isPending }) =>
+                isPending ? (
+                  <>
+                    <Spinner size="sm" color="current" />
+                    Uploading
+                  </>
+                ) : (
+                  <>
+                    <Upload className="size-4" />
+                    Choose a file
+                  </>
+                )
+              }
+            </Button>
+          </div>
+          {studio.error && (
+            <Alert status="danger" className="pointer-events-auto mt-5 max-w-md text-left">
+              <Alert.Indicator />
+              <Alert.Content>
+                <Alert.Title>Couldn&apos;t use that file</Alert.Title>
+                <Alert.Description>{studio.error}</Alert.Description>
+              </Alert.Content>
+            </Alert>
+          )}
+        </main>
+      )}
+
+      {isEmpty && (
+        <div className="glass absolute bottom-6 left-6 z-10 hidden items-center gap-2 rounded-full py-2 pl-2.5 pr-3.5 text-[13px] shadow-surface md:flex">
+          <Check className="size-4 text-success" strokeWidth={2.4} />
+          Uploads are private and deleted after 7 days
+        </div>
+      )}
+
+      {!isEmpty && (
+        <section
+          aria-label={stage === "ready" ? "Result" : stage === "processing" ? "Processing" : "Settings"}
+          className="glass relative z-10 mx-3 mb-4 mt-3 flex flex-col rounded-3xl p-5 shadow-overlay md:absolute md:bottom-10 md:right-10 md:top-[88px] md:m-0 md:w-[400px] md:p-6"
+        >
+          <FileSummary
+            name={upload?.originalName ?? ""}
+            detail={scanDetail}
+            onReplace={stage === "configure" || stage === "ready" ? chooseFile : undefined}
+          />
+          {stage === "configure" && (
+            <SettingsPanel
+              quality={studio.quality}
+              onQualityChange={studio.setQuality}
+              advanced={studio.advanced}
+              onAdvancedChange={studio.setAdvanced}
+              onStart={studio.process}
+              canStart={!studio.uploading}
+              error={studio.error}
+            />
+          )}
+          {stage === "processing" && (
+            <ProcessingPanel
+              progress={studio.progress}
+              stageIndex={studio.stageIndex}
+              secondsLeft={studio.secondsLeft}
+              onCancel={studio.cancel}
+            />
+          )}
+          {stage === "ready" && processedFile && (
+            <ResultPanel
+              downloadUrl={ApiClient.getDownloadUrl(processedFile)}
+              downloadName={`${name.toLowerCase().replace(/\s+/g, "-") || "model"}.${isMesh ? "glb" : "ply"}`}
+              isMesh={isMesh}
+              stats={studio.stats}
+              modelInfo={modelInfo}
+              quality={studio.quality}
+              onAdjust={studio.adjust}
+              onStartOver={studio.startOver}
+            />
+          )}
+        </section>
+      )}
     </div>
   )
 }

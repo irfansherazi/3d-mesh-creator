@@ -8,28 +8,38 @@ export interface UploadResponse {
   error?: string
 }
 
+export type DensityMode = "dense" | "medium" | "coarse"
+export type SmoothingMode = "low" | "medium" | "high"
+
 export interface ProcessingParams {
   filename: string
+  // The processor only checks voxelSize > 0 to enable downsampling; the actual size adapts to the scan
   voxelSize: number
   method: string
   enableFiltering: boolean
   enableReconstruction: boolean
+  densityMode: DensityMode
+  smoothingMode: SmoothingMode
+}
+
+export interface ProcessingStats {
+  original_points?: number
+  processed_points?: number
+  faces?: number
+  vertices?: number
+  processing_time?: number
+  method?: string
+  density_mode?: string
+  smoothing_mode?: string
+  is_watertight?: boolean
+  bounding_box_volume?: number
 }
 
 export interface ProcessingResponse {
   success: boolean
   processedFile?: string
-  stats?: {
-    original_points: number
-    processed_points: number
-    faces: number
-    vertices: number
-    processing_time: number
-    method: string
-    voxel_size: number
-    filtering_enabled: boolean
-    reconstruction_enabled: boolean
-  }
+  stats?: ProcessingStats
+  processingTime?: number
   error?: string
 }
 
@@ -46,19 +56,20 @@ export class ApiClient {
     return response.json()
   }
 
-  static async processFile(params: ProcessingParams): Promise<ProcessingResponse> {
+  static async processFile(params: ProcessingParams, signal?: AbortSignal): Promise<ProcessingResponse> {
     const response = await fetch("/api/process", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
       },
       body: JSON.stringify(params),
+      signal,
     })
 
     return response.json()
   }
 
   static getDownloadUrl(filename: string): string {
-    return `/api/download/${filename}`
+    return `/api/download/${encodeURIComponent(filename)}`
   }
 }

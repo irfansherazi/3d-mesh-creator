@@ -1,12 +1,13 @@
 import type { Metadata } from 'next'
-import { GeistSans } from 'geist/font/sans'
-import { GeistMono } from 'geist/font/mono'
+import { Inter } from 'next/font/google'
 import { Analytics } from '@vercel/analytics/next'
 import './globals.css'
 
+const inter = Inter({ subsets: ['latin'], variable: '--font-inter', display: 'swap' })
+
 export const metadata: Metadata = {
-  title: '3D Model Creator Pro - Professional Point Cloud to Mesh Converter',
-  description: 'Transform scanner point clouds into e-commerce ready 3D models in under 30 seconds. Perfect for content managers and online retailers.',
+  title: 'Mesh Creator: point cloud to GLB',
+  description: 'Turn a scanner point cloud into a GLB model your store can show in 3D.',
   generator: '3D Model Creator Pro',
 }
 
@@ -16,8 +17,8 @@ export default function RootLayout({
   children: React.ReactNode
 }>) {
   return (
-    <html lang="en">
-      <body className={`font-sans ${GeistSans.variable} ${GeistMono.variable}`}>
+    <html lang="en" className={`light ${inter.variable}`} data-theme="light">
+      <body className="font-sans antialiased">
         {children}
         <Analytics />
       </body>

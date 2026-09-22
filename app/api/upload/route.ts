@@ -2,6 +2,7 @@ import { type NextRequest, NextResponse } from "next/server"
 import { writeFile, mkdir } from "fs/promises"
 import { existsSync } from "fs"
 import path from "path"
+import { MAX_UPLOAD_BYTES, UPLOADS_DIR } from "@/lib/paths"
 
 export async function POST(request: NextRequest) {
   try {
@@ -10,6 +11,13 @@ export async function POST(request: NextRequest) {
 
     if (!file) {
       return NextResponse.json({ error: "No file uploaded" }, { status: 400 })
+    }
+
+    if (file.size > MAX_UPLOAD_BYTES) {
+      return NextResponse.json(
+        { error: `File is too large. The limit is ${Math.round(MAX_UPLOAD_BYTES / 1024 / 1024)} MB.` },
+        { status: 413 },
+      )
     }
 
     // Validate file type
@@ -26,15 +34,15 @@ export async function POST(request: NextRequest) {
     }
 
     // Create uploads directory if it doesn't exist
-    const uploadsDir = path.join(process.cwd(), "uploads")
-    if (!existsSync(uploadsDir)) {
-      await mkdir(uploadsDir, { recursive: true })
+    if (!existsSync(UPLOADS_DIR)) {
+      await mkdir(UPLOADS_DIR, { recursive: true })
     }
 
-    // Generate unique filename
+    // Generate unique filename; keep only the base name with safe characters so it can't escape UPLOADS_DIR
     const timestamp = Date.now()
-    const filename = `${timestamp}_${file.name}`
-    const filepath = path.join(uploadsDir, filename)
+    const safeName = path.basename(file.name).replace(/[^A-Za-z0-9._-]/g, "_")
+    const filename = `${timestamp}_${safeName}`
+    const filepath = path.join(UPLOADS_DIR, filename)
 
     // Save file
     const bytes = await file.arrayBuffer()

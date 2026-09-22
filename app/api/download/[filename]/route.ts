@@ -2,13 +2,14 @@ import { type NextRequest, NextResponse } from "next/server"
 import { readFile } from "fs/promises"
 import { existsSync } from "fs"
 import path from "path"
+import { uploadPath } from "@/lib/paths"
 
-export async function GET(request: NextRequest, { params }: { params: { filename: string } }) {
+export async function GET(request: NextRequest, { params }: { params: Promise<{ filename: string }> }) {
   try {
-    const filename = params.filename
-    const filepath = path.join(process.cwd(), "uploads", filename)
+    const { filename } = await params
+    const filepath = uploadPath(filename)
 
-    if (!existsSync(filepath)) {
+    if (!filepath || !existsSync(filepath)) {
       return NextResponse.json({ error: "File not found" }, { status: 404 })
     }
 
@@ -25,7 +26,7 @@ export async function GET(request: NextRequest, { params }: { params: { filename
       contentType = "application/octet-stream"
     }
 
-    return new NextResponse(fileBuffer, {
+    return new NextResponse(new Uint8Array(fileBuffer), {
       headers: {
         "Content-Type": contentType,
         "Content-Disposition": `attachment; filename="${filename}"`,

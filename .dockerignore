@@ -1,0 +1,13 @@
+.git
+.next
+node_modules
+uploads
+scripts/.venv
+**/__pycache__
+*.log
+.env*
+!.env.example
+.idea
+.vscode
+.claude
+.remember

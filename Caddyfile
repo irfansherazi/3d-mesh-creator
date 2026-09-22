@@ -1,0 +1,11 @@
+# DOMAIN is a hostname (automatic HTTPS via Let's Encrypt) or ":80" for plain HTTP on the instance IP.
+{$DOMAIN} {
+	encode zstd gzip
+
+	request_body {
+		max_size {$MAX_UPLOAD_MB}MB
+	}
+
+	# Processing requests stay open until the Python run finishes (up to a few minutes)
+	reverse_proxy app:3000
+}
