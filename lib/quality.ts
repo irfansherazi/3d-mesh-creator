@@ -17,7 +17,7 @@ export const QUALITY_PRESETS: Record<Quality, QualityPreset> = {
     description: "Smallest file, softer edges",
     densityMode: "coarse",
     smoothingMode: "medium",
-    seconds: 20,
+    seconds: 10,
   },
   balanced: {
     label: "Balanced",
@@ -31,7 +31,7 @@ export const QUALITY_PRESETS: Record<Quality, QualityPreset> = {
     description: "Sharpest edges, largest file",
     densityMode: "dense",
     smoothingMode: "low",
-    seconds: 45,
+    seconds: 60,
   },
 }
 

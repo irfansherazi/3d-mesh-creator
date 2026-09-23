@@ -17,7 +17,10 @@ import trimesh as tm
 from pathlib import Path
 from sklearn.cluster import DBSCAN
 from skimage import measure
-from scipy.spatial.distance import cdist
+
+# Most points handed to surface reconstruction per density mode. Ball pivoting time grows much faster than
+# linearly: about 6 s at 48k points and 8 min at 258k on a laptop CPU.
+RECONSTRUCTION_POINT_BUDGET = {'coarse': 50000, 'medium': 100000, 'dense': 160000}
 
 # Configure logging
 logging.basicConfig(
@@ -88,20 +91,24 @@ class AdvancedPointCloudProcessor:
         extent = bbox.get_extent()
         diagonal = np.linalg.norm(extent)
         
-        # Estimate point density
+        # Estimate point spacing with KD-tree queries. A dense distance matrix (cdist) needs
+        # 8 bytes x 1000 x N, which is ~20 GB for a 2.5M point scan.
+        tree = o3d.geometry.KDTreeFlann(pcd)
         if len(points) > 1000:
-            # Sample 1000 points for density estimation
-            indices = np.random.choice(len(points), 1000, replace=False)
-            sample_points = points[indices]
-            distances = cdist(sample_points, points)
-            # Average distance to 10th nearest neighbor
-            knn_distances = np.partition(distances, 10, axis=1)[:, 10]
-            avg_spacing = np.mean(knn_distances)
+            # Average distance to the 10th nearest neighbor over 1000 sampled points
+            sample = np.random.choice(len(points), 1000, replace=False)
+            rank = 10
         else:
-            # For small point clouds, use all points
-            distances = cdist(points, points)
-            np.fill_diagonal(distances, np.inf)
-            avg_spacing = np.mean(np.min(distances, axis=1))
+            # Small clouds: average distance to the nearest neighbor over every point
+            sample = np.arange(len(points))
+            rank = 1
+        spacings = []
+        for i in sample:
+            # k includes the query point itself at distance 0
+            k, _, dist2 = tree.search_knn_vector_3d(points[i], rank + 1)
+            if k > 1:
+                spacings.append(np.sqrt(dist2[min(rank, k - 1)]))
+        avg_spacing = float(np.mean(spacings)) if spacings else 0.0
         
         analysis = {
             'num_points': len(points),
@@ -131,42 +138,26 @@ class AdvancedPointCloudProcessor:
         voxel_size = base_voxel_size * density_multipliers.get(target_density, 1.0)
         
         self.logger.info(f"Using adaptive voxel size: {voxel_size:.6f}")
-        
-        # Use MeshLab for better Poisson disk sampling
-        if len(pcd.points) > 10000:
-            return self._meshlab_downsample(pcd, target_density)
-        else:
-            return pcd.voxel_down_sample(voxel_size)
 
-    def _meshlab_downsample(self, pcd, density_mode):
-        """Use MeshLab Poisson disk sampling for better distribution"""
-        try:
-            # Convert to meshlab mesh
-            ml_mesh = self._o3d_to_ml_pointcloud(pcd)
-            ms = ml.MeshSet()
-            ms.add_mesh(ml_mesh)
-            
-            # Poisson disk sampling parameters
-            radius_multipliers = {
-                'dense': 2.5,
-                'medium': 4.0,
-                'coarse': 8.0
-            }
-            
-            radius = radius_multipliers.get(density_mode, 4.0)
-            
-            ms.apply_filter('generate_sampling_poisson_disk', 
-                          radius=ml.PureValue(radius),
-                          subsample=True)
-            
-            # Convert back to Open3D
-            return self._ml_to_o3d_pointcloud(ms.current_mesh())
-            
-        except Exception as e:
-            self.logger.warning(f"MeshLab downsampling failed: {e}, using voxel downsampling")
-            analysis = self.analyze_point_cloud(pcd)
-            voxel_size = analysis['avg_point_spacing'] * 2.0
-            return pcd.voxel_down_sample(voxel_size)
+        # Voxel size follows the scan's own spacing, so it works in any unit and honours the density mode.
+        # (The previous MeshLab Poisson-disk path used an absolute radius and failed on current pymeshlab.)
+        return pcd.voxel_down_sample(voxel_size)
+
+    def limit_points(self, pcd, budget, avg_spacing):
+        """Thin the cloud to roughly `budget` points; ball pivoting slows down sharply on large clouds"""
+        n = len(pcd.points)
+        if n <= budget:
+            return pcd
+        # avg_spacing is the 10th-neighbour distance, about 1.8x the nearest-neighbour spacing on a surface.
+        # Scans are surfaces, so point count falls with the square of the voxel size.
+        voxel_size = (avg_spacing / 1.8) * np.sqrt(n / budget)
+        for _ in range(8):
+            thinned = pcd.voxel_down_sample(voxel_size)
+            if len(thinned.points) <= budget:
+                break
+            voxel_size *= max(1.05, np.sqrt(len(thinned.points) / budget))
+        self.logger.info(f"Thinned {n} points to {len(thinned.points)} for reconstruction (budget {budget})")
+        return thinned
 
     def advanced_noise_filtering(self, pcd):
         """Multi-stage noise filtering inspired by XO-Armor processing"""
@@ -485,59 +476,71 @@ class AdvancedPointCloudProcessor:
             return mesh.filter_smooth_taubin(**params)
 
     # Utility conversion functions
+    @staticmethod
+    def _rgba(colors):
+        """pymeshlab wants vertex colours as float64 RGBA in 0..1; Open3D stores RGB in 0..1"""
+        colors = np.asarray(colors, dtype=np.float64)
+        return np.hstack([colors, np.ones((len(colors), 1))])
+
     def _o3d_to_ml_pointcloud(self, pcd):
-        """Convert Open3D point cloud to MeshLab mesh"""
-        points = np.asarray(pcd.points).astype(np.float64)
-        m = ml.Mesh(vertex_matrix=points)
-        
+        """Convert Open3D point cloud to MeshLab mesh, keeping normals and colours"""
+        kwargs = {"vertex_matrix": np.asarray(pcd.points).astype(np.float64)}
         if pcd.has_normals():
-            normals = np.asarray(pcd.normals).astype(np.float64)
-            m = ml.Mesh(vertex_matrix=points, v_normals_matrix=normals)
-        
+            kwargs["v_normals_matrix"] = np.asarray(pcd.normals).astype(np.float64)
         if pcd.has_colors():
-            colors = (np.asarray(pcd.colors) * 255).astype(np.uint8)
-            m = ml.Mesh(vertex_matrix=points, v_color_matrix=colors)
-            
-        return m
+            kwargs["v_color_matrix"] = self._rgba(pcd.colors)
+        return ml.Mesh(**kwargs)
 
     def _o3d_to_ml_mesh(self, mesh):
-        """Convert Open3D mesh to MeshLab mesh"""
-        vertices = np.asarray(mesh.vertices).astype(np.float64)
-        faces = np.asarray(mesh.triangles).astype(np.uint32)
-        return ml.Mesh(vertex_matrix=vertices, face_matrix=faces)
+        """Convert Open3D mesh to MeshLab mesh, keeping vertex colours"""
+        kwargs = {
+            "vertex_matrix": np.asarray(mesh.vertices).astype(np.float64),
+            "face_matrix": np.asarray(mesh.triangles).astype(np.int32),
+        }
+        if mesh.has_vertex_colors():
+            kwargs["v_color_matrix"] = self._rgba(mesh.vertex_colors)
+        return ml.Mesh(**kwargs)
 
     def _ml_to_o3d_pointcloud(self, ml_mesh):
         """Convert MeshLab mesh to Open3D point cloud"""
         pcd = o3d.geometry.PointCloud()
         pcd.points = o3d.utility.Vector3dVector(ml_mesh.vertex_matrix())
-        
+
         if ml_mesh.has_vertex_normal():
             pcd.normals = o3d.utility.Vector3dVector(ml_mesh.vertex_normal_matrix())
-            
+
         if ml_mesh.has_vertex_color():
-            colors = ml_mesh.vertex_color_matrix().astype(np.float64) / 255.0
-            pcd.colors = o3d.utility.Vector3dVector(colors)
-            
+            # Already RGBA floats in 0..1
+            pcd.colors = o3d.utility.Vector3dVector(ml_mesh.vertex_color_matrix()[:, :3])
+
         return pcd
 
     def _ml_to_o3d_mesh(self, ml_mesh):
-        """Convert MeshLab mesh to Open3D mesh"""
+        """Convert MeshLab mesh to Open3D mesh, keeping vertex colours"""
         mesh = o3d.geometry.TriangleMesh()
         mesh.vertices = o3d.utility.Vector3dVector(ml_mesh.vertex_matrix())
         mesh.triangles = o3d.utility.Vector3iVector(ml_mesh.face_matrix())
+        if ml_mesh.has_vertex_color():
+            mesh.vertex_colors = o3d.utility.Vector3dVector(ml_mesh.vertex_color_matrix()[:, :3])
         return mesh
 
     def _o3d_to_trimesh(self, mesh):
         """Convert Open3D mesh to trimesh"""
         vertices = np.asarray(mesh.vertices)
         faces = np.asarray(mesh.triangles)
-        return tm.Trimesh(vertices=vertices, faces=faces)
+        vertex_colors = None
+        if mesh.has_vertex_colors():
+            vertex_colors = (np.asarray(mesh.vertex_colors) * 255).round().astype(np.uint8)
+        return tm.Trimesh(vertices=vertices, faces=faces, vertex_colors=vertex_colors)
 
     def _trimesh_to_o3d(self, tm_mesh):
         """Convert trimesh to Open3D mesh"""
         mesh = o3d.geometry.TriangleMesh()
         mesh.vertices = o3d.utility.Vector3dVector(tm_mesh.vertices)
         mesh.triangles = o3d.utility.Vector3iVector(tm_mesh.faces)
+        colors = getattr(tm_mesh.visual, "vertex_colors", None)
+        if colors is not None and len(colors) == len(tm_mesh.vertices):
+            mesh.vertex_colors = o3d.utility.Vector3dVector(np.asarray(colors)[:, :3] / 255.0)
         return mesh
 
 def process_point_cloud(input_path, output_path, voxel_size, method, enable_filtering, enable_reconstruction, density_mode="medium", smoothing_mode="medium"):
@@ -573,7 +576,14 @@ def process_point_cloud(input_path, output_path, voxel_size, method, enable_filt
         if enable_reconstruction:
             # Update analysis after processing
             analysis = processor.analyze_point_cloud(pcd)
-            
+
+            # Keep reconstruction time bounded on very large scans
+            budget = RECONSTRUCTION_POINT_BUDGET.get(density_mode, RECONSTRUCTION_POINT_BUDGET['medium'])
+            if len(pcd.points) > budget:
+                pcd = processor.limit_points(pcd, budget, analysis['avg_point_spacing'])
+                processed_points = len(pcd.points)
+                analysis = processor.analyze_point_cloud(pcd)
+
             mesh = processor.advanced_surface_reconstruction(pcd, method, analysis)
             
             # Clean and optimize mesh

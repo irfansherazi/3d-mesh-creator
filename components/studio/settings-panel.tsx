@@ -30,7 +30,8 @@ interface SettingsPanelProps {
 }
 
 const QUALITY_ORDER: Quality[] = ["quick", "balanced", "detailed"]
-const ESTIMATED_SIZE: Record<Quality, string> = { quick: "0.4 MB", balanced: "0.8 MB", detailed: "1.9 MB" }
+// Typical GLB sizes measured on product scans; colour and surface detail move these a lot
+const ESTIMATED_SIZE: Record<Quality, string> = { quick: "0.6 MB", balanced: "3 MB", detailed: "10 MB" }
 
 /** Quality choice plus the processor's advanced options, tucked behind a disclosure. */
 export function SettingsPanel({
